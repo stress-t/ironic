@@ -356,6 +356,8 @@ update-grub
 ```
 #### Скрипт созадния образа
 DIB_BLOCK_DEVICE_CONFIG с разметкой дисков
+
+uuid не обязательны
 ```shell
 export DIB_BLOCK_DEVICE_CONFIG='''
 - local_loop:
