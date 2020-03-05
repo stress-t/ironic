@@ -1,4 +1,4 @@
-**Tags:** ironic standelon baremetal
+**Tags:** ironic standalone baremetal
 ## Установка узлов в режиме Legasy Boot
 ### Утановка и настройка Dnsmasq
 Тестирование происходило на версии dnsmasq-2.76
