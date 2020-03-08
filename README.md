@@ -1,5 +1,83 @@
 **Tags:** ironic standalone baremetal
-## Установка узлов в режиме Legasy Boot
+<!-- markdown-toc start - Don't edit this section. Run M-x markdown-toc-generate-toc again -->
+**Table of Contents**
+
+- [IRONIC STANDALONE](#ironic-standalone)
+    - [Общие дествия](#общие-дествия)
+        - [Утановка и настройка nginx](#утановка-и-настройка-nginx)
+        - [Утановка и настройка Dnsmasq](#утановка-и-настройка-dnsmasq)
+    - [Установка mariadb](#установка-mariadb)
+    - [Устанавливаем Ironic](#устанавливаем-ironic)
+        - [Ironic.conf](#ironicconf)
+        - [Подготавлаиваем загрузку по iPXE](#подготавлаиваем-загрузку-по-ipxe)
+            - [Скачиваем IPA vmzlinuz и initram](#скачиваем-ipa-vmzlinuz-и-initram)
+            - [Файл boot.ipxe](#файл-bootipxe)
+            - [Примерное содержимое директории /tftpboot/](#примерное-содержимое-директории-tftpboot)
+    - [Установка пакетов дополнительных пакетов](#установка-пакетов-дополнительных-пакетов)
+    - [Установка узлов в режиме Legacy Boot](#установка-узлов-в-режиме-legacy-boot)
+        - [Создаине образа](#создаине-образа)
+            - [Добавлем катстомные хуки](#добавлем-катстомные-хуки)
+        - [Скрипт созадния образа](#скрипт-созадния-образа)
+        - [Добавляем узел](#добавляем-узел)
+        - [Добавляем порт(ы) ноды. С этих маков будет разрешена загрузка по iPXE](#добавляем-порты-ноды-с-этих-маков-будет-разрешена-загрузка-по-ipxe)
+        - [Настариваем узел](#настариваем-узел)
+        - [Деплоим узел](#деплоим-узел)
+    - [Установка узлов в режиме UEFI](#установка-узлов-в-режиме-uefi)
+        - [Создаине образа](#создаине-образа)
+            - [Добавлем катстомные хуки](#добавлем-катстомные-хуки)
+        - [Скрипт для создиня образа диска](#скрипт-для-создиня-образа-диска)
+        - [Добавляем узел](#добавляем-узел)
+        - [Добавляем порт(ы) ноды. С этих маков будет разрешена загрузка по iPXE](#добавляем-порты-ноды-с-этих-маков-будет-разрешена-загрузка-по-ipxe)
+        - [Настариваем узел](#настариваем-узел)
+        - [Деплоим узел](#деплоим-узел)
+
+<!-- markdown-toc end -->
+
+
+# IRONIC STANDALONE
+
+## Общие дествия
+Да грязно, но пока так
+```
+setenforce 0
+systemctl stop firewalld
+systemctl disable firewalld
+
+```
+
+```
+mkdir /tftpboot
+```
+### Утановка и настройка nginx
+**CentOS**
+```
+yum install -y epel-release
+yum install -y nginx
+```
+**Ubuntu**
+```
+apt-get install nginx
+```
+**Конфиг nginx**
+```
+/etc/nginx/nginx.conf
+http {
+    ...
+    server {
+        ...
+        listen       8080 default_server;
+        listen       [::]:8080 default_server;
+        ...
+        root         /tftpboot;
+        ...
+        }
+    ...
+}
+```
+```
+systemctl enable nginx
+systemctl restart nginx
+```
 ### Утановка и настройка Dnsmasq
 Тестирование происходило на версии dnsmasq-2.76
 
@@ -13,7 +91,7 @@ apt-get install dnsmasq
 ```
 **Конфиг dnsmasq**
 ```
-interface=bond0
+interface=eno1
 bind-dynamic
 enable-tftp
 tftp-root=/tftpboot
@@ -22,7 +100,9 @@ tftp-root=/tftpboot
 port=0
 
 log-dhcp
-dhcp-range=10.1.1.100,10.1.1.105,12h
+dhcp-range=10.1.1.104,10.1.1.105,12h #Что-бы никому не мешать
+dhcp-host=44:a1:91:fe:ae:6e,10.1.1.104 # Что-бы никому не мешать
+dhcp-host=44:a1:91:fe:ae:6f,10.1.1.105 # Что-бы никому не мешать
 
 # Disable default router(s) and DNS over provisioning network
 dhcp-option=3
@@ -43,15 +123,113 @@ dhcp-boot=tag:efi,tag:!ipxe,ipxe.efi
 # Client is running PXE over BIOS; send BIOS version of iPXE chainloader
 dhcp-boot=/undionly.kpxe,10.1.1.25
 ```
+## Установка mariadb
+```
+yum install mariadb-server mariadb -y
+systemctl enable mariadb
+systemctl restart mariadb
+```
+```
+# mysql -u root -p
+mysql> CREATE DATABASE ironic CHARACTER SET utf8;
+mysql> GRANT ALL PRIVILEGES ON ironic.* TO 'ironic'@'localhost' \
+       IDENTIFIED BY 'IRONIC_DBPASSWORD';
+mysql> GRANT ALL PRIVILEGES ON ironic.* TO 'ironic'@'%' \
+       IDENTIFIED BY 'IRONIC_DBPASSWORD';
+```
+
+
+
+## Устанавливаем Ironic
+**CentOS**
+**!!ВАЖНО!!**
+Мне пришлось взять https://trunk.rdoproject.org/ (https://trunk.rdoproject.org/centos7-train/current/) потому что правки для установки uefi были только в свежих версиях Train
+```
+curl -o /etc/yum.repos.d/delorean.repo https://trunk.rdoproject.org/centos7-train/current/delorean.repo
+yum-config-manager --enable delorean
+```
+https://docs.openstack.org/ironic/latest/install/install-rdo.html
+
+```
+yum install -y openstack-ironic-api openstack-ironic-conductor diskimage-builder bash-completion python-openstackclient bash-completion-extras
+openstack complete | sudo tee /etc/bash_completion.d/osc.bash_completion > /dev/null
+source /etc/profile.d/bash_completion.sh
+```
+
+
+```
+rpm -qa |grep ironic
+openstack-ironic-common-13.0.3-0.20200305145746.73ec9b8.el7.noarch
+openstack-ironic-python-agent-builder-1.1.1-0.20200302130802.b32f4ea.el7.noarch
+python2-ironic-inspector-client-3.7.0-1.el7.noarch
+python2-ironic-lib-2.21.0-1.el7.noarch
+openstack-ironic-api-13.0.3-0.20200305145746.73ec9b8.el7.noarch
+python2-ironicclient-3.1.1-1.el7.noarch
+openstack-ironic-conductor-13.0.3-0.20200305145746.73ec9b8.el7.noarch
+```
+
+### Ironic.conf
+```
+[DEFAULT]
+auth_strategy = noauth
+enabled_hardware_types = ipmi
+enabled_bios_interfaces = no-bios,redfish,ilo
+enabled_boot_interfaces = ipxe,pxe
+enabled_management_interfaces = ipmitool
+enabled_network_interfaces=noop
+enabled_power_interfaces = ipmitool
+enabled_vendor_interfaces = ipmitool,no-vendor
+rpc_transport = json-rpc
+debug = true
+
+[agent]
+deploy_logs_collect = always
+image_download_source = http
+
+[api]
+api_workers = 5
+
+[conductor]
+automated_clean = false
+
+[database]
+connection = mysql+pymysql://ironic:IRONIC_DBPASSWORD@127.0.0.1/ironic?charset=utf8
+
+[deploy]
+http_url = http://10.1.1.25:8080
+http_root = /tftpboot
+[disk_utils]
+dd_block_size = 4M
+[dhcp]
+dhcp_provider = none
+
+[pxe]
+pxe_append_params = systemd.journald.forward_to_console=yes ipa-debug=1 nofb nomodeset vga=normal
+tftp_server = 10.1.1.25
+tftp_root = /tftpboot
+tftp_master_path = /tftpboot/master_images
+pxe_bootfile_name = undionly.kpxe
+pxe_config_template = $pybasedir/drivers/modules/ipxe_config.template
+pxe = true
+instance_master_path = /tftpboot/master_images
+images_path = /tftpboot/cache
+uefi_pxe_bootfile_name=ipxe.efi
+uefi_pxe_config_template = $pybasedir/drivers/modules/ipxe_config.template
+[service_catalog]
+endpoint_override = http://10.1.1.25:6385/
+```
 ### Подготавлаиваем загрузку по iPXE
 Создаем все нужные директории и сокпируем фалы согластно иструкции
+Все действия с директорией /httpboot меняем на /tftpboot
+Шаги с изменинями конфигов не нужны (уже настроили выше)
+
 https://docs.openstack.org/ironic/latest/install/configure-pxe.html#ipxe-setup
 
-### Скачиваем IPA vmzlinuz и initram
+#### Скачиваем IPA vmzlinuz и initram
 На момент тестов работаь с много томными имаджами может только ipa-centos8
 **IPA:** https://tarballs.opendev.org/openstack/ironic-python-agent/dib/files/
 
-# Файл boot.ipxe
+#### Файл boot.ipxe
 ```shell
 #!ipxe
 
@@ -78,7 +256,17 @@ echo Press any key to reboot...
 prompt --timeout 180
 
 ```
-### Примерное содержимое директории /tftpboot/
+
+```
+ironic-dbsync --config-file /etc/ironic/ironic.conf create_schema
+systemctl enable openstack-ironic-api openstack-ironic-conductor
+systemctl restart openstack-ironic-api openstack-ironic-conductor
+export OS_AUTH_TYPE=none
+export OS_ENDPOINT=http://localhost:6385/
+
+```
+
+#### Примерное содержимое директории /tftpboot/
 ```
 ls -1 /tftpboot/
 boot.ipxe
@@ -90,222 +278,13 @@ map-file
 master_images
 undionly.kpxe
 ```
-### Устанавливаем Ironic
-**CentOS**
-
-https://docs.openstack.org/ironic/latest/install/install-rdo.html
-
+## Установка пакетов дополнительных пакетов
 ```
-rpm -qa | grep ironic
-openstack-ironic-conductor-13.0.2-1.el7.noarch
-python2-ironic-python-agent-5.0.1-1.el7.noarch
-openstack-ironic-python-agent-5.0.1-1.el7.noarch
-python2-ironic-lib-2.21.0-1.el7.noarch
-openstack-ironic-common-13.0.2-1.el7.noarch
-openstack-ironic-api-13.0.2-1.el7.noarch
-openstack-ironic-staging-drivers-0.12.0-1.el7.noarch
-openstack-ironic-python-agent-builder-1.0.0-1.el7.noarch
-python2-ironicclient-3.1.1-1.el7.noarch
-python2-ironic-inspector-client-3.7.0-1.el7.noarch
-diskimage-builder-2.27.2-1.el7.noarch
+yum install -y squashfs-tools gdisk policycoreutils-python
 ```
 
-### Ironic.conf
-Привожу diff
-```
---- ironic.conf.default 2020-02-27 09:30:34.333185363 -0500
-+++ ironic.conf 2020-03-02 04:23:01.882999831 -0500
-@@ -11,6 +11,7 @@                                            
- # noauth - no authentication      
- # keystone - use the Identity service for authentication
- #auth_strategy = keystone                           
-+auth_strategy = noauth                                
-               
- # Return server tracebacks in the API response for any error
- # responses. WARNING: this is insecure and should not be used
-@@ -35,6 +36,8 @@                                        
- # enumerating the "ironic.hardware.types" entrypoint. (list
- # value)                   
- #enabled_hardware_types = ipmi    
-+enabled_hardware_types = ipmi                    
-+                            
-                                  
- # Specify the list of bios interfaces to load during service                                                                                                  
- # initialization. Missing bios interfaces, or bios interfaces
-@@ -51,6 +54,7 @@                                        
- # enabled bios interfaces on every ironic-conductor service.
- # (list value)                   
- #enabled_bios_interfaces = no-bios                                   
-+enabled_bios_interfaces = no-bios,redfish,ilo
-                               
- # Default bios interface to be used for nodes that do not have
- # bios_interface field set. A complete list of bios interfaces
-@@ -72,13 +76,14 @@                                      
- # every enabled hardware type will have the same set of
- # enabled boot interfaces on every ironic-conductor service.
- # (list value)                                                
--#enabled_boot_interfaces = pxe
-+enabled_boot_interfaces = ipxe,pxe
-                                                               
- # Default boot interface to be used for nodes that do not have
- # boot_interface field set. A complete list of boot interfaces
- # present on your system may be found by enumerating the   
- # "ironic.hardware.interfaces.boot" entrypoint. (string value)
- #default_boot_interface = <None>                            
-+#default_boot_interface = ipxe                             
-                                                         
- # Specify the list of console interfaces to load during
- # service initialization. Missing console interfaces, or    
-@@ -165,6 +170,7 @@                                      
- # enabled management interfaces on every ironic-conductor
- # service. (list value)                                       
- #enabled_management_interfaces = ipmitool
-+enabled_management_interfaces = ipmitool             
-                                                   
- # Default management interface to be used for nodes that do
- # not have management_interface field set. A complete list of
-@@ -188,6 +194,7 @@
- # hardware type will have the same set of enabled network
- # interfaces on every ironic-conductor service. (list value)
- #enabled_network_interfaces = flat,noop
-+enabled_network_interfaces=noop
-  
- # Default network interface to be used for nodes that do not
- # have network_interface field set. A complete list of network
-@@ -211,6 +218,7 @@
- # type will have the same set of enabled power interfaces on
- # every ironic-conductor service. (list value)
- #enabled_power_interfaces = ipmitool
-+enabled_power_interfaces = ibmc,ipmitool
-  
- # Default power interface to be used for nodes that do not
- # have power_interface field set. A complete list of power
-@@ -302,6 +310,7 @@
- # type will have the same set of enabled vendor interfaces on
- # every ironic-conductor service. (list value)
- #enabled_vendor_interfaces = ipmitool,no-vendor
-+enabled_vendor_interfaces = ibmc,ipmitool,no-vendor
-
- # Default vendor interface to be used for nodes that do not
- # have vendor_interface field set. A complete list of vendor
-@@ -483,6 +492,7 @@
- # oslo - use oslo.messaging transport
- # json-rpc - use JSON RPC transport
- #rpc_transport = oslo
-+rpc_transport = json-rpc
-  
- # Path to the rootwrap configuration file to use for running
- # commands as root. (string value)
-@@ -504,6 +514,7 @@
- # instead of the default INFO level. (boolean value)
- # Note: This option can be changed without restarting.
- #debug = false
-+debug = false
-  
- # The name of a logging configuration file. This file is
- # appended to any existing logging configuration files. For
-@@ -787,7 +798,7 @@
- # always - always collect the logs
- # on_failure - only collect logs if there is a failure
- # never - never collect logs
--#deploy_logs_collect = on_failure
-+deploy_logs_collect = always
-  
- # The name of the storage backend where the logs will be
- # stored. (string value)
-@@ -823,6 +834,7 @@
- # http - IPA ramdisk retrieves instance image from HTTP
- # service served at conductor nodes.
- #image_download_source = swift
-+image_download_source = http
-  
- # Timeout (in seconds) for IPA commands. (integer value)
- #command_timeout = 60
-@@ -1002,6 +1014,8 @@
- # be determined, else a default worker count of 1 is returned.
- # (integer value)
- #api_workers = <None>
-+api_workers = 5
- 
- # Enable the integrated stand-alone API to service requests
- # via HTTPS instead of HTTP. If there is a front-end service
-@@ -1244,6 +1258,7 @@
- # instead if required to use a specific ironic api address,
- # for example in noauth mode.
- #api_url = <None>
-+#api_url = http://10.1.1.25:6385/
-  
- # Maximum time (in seconds) since the last check-in of a
- # conductor. A conductor is considered inactive when this time
-@@ -1375,6 +1390,7 @@
- # are trusted (eg, because there is only one tenant), this
- # option could be safely disabled. (boolean value)
- #automated_clean = true
-+automated_clean = false
-  
- # Whether to allow nodes to enter or undergo deploy or
- # cleaning when in maintenance mode. If this option is set to
-@@ -1569,6 +1585,7 @@
- # Deprecated group/name - [DATABASE]/sql_connection
- # Deprecated group/name - [sql]/connection
- #connection = <None>
-+connection=mysql+pymysql://ironic:IRONIC_DBPASSWORD@127.0.0.1/ironic?charset=utf8
-  
- # The SQLAlchemy connection string to use to connect to the
- # slave database. (string value)
-@@ -1675,9 +1692,10 @@
- # ironic-conductor node's HTTP server URL. Example:
- # http://192.1.2.3:8080 (string value)
- #http_url = <None>
-+http_url = http://10.1.1.25:8080
-  
- # ironic-conductor node's HTTP root path. (string value)
--#http_root = /httpboot
-+http_root = /tftpboot
- # Whether to support the use of ATA Secure Erase during the
- # cleaning process. Defaults to True. (boolean value)
-@@ -1791,6 +1809,7 @@
- # DHCP provider to use. "neutron" uses Neutron, and "none"
- # uses a no-op provider. (string value)
- #dhcp_provider = neutron
-+dhcp_provider = none
-    
- [disk_partitioner]
-@@ -2603,6 +2622,7 @@
- # Minimum value: 0
- # Maximum value: 65535
- #port = 8089
-+#port = 9999
-  
- # Whether to use TLS for JSON RPC (boolean value)
- #use_ssl = false
-@@ -4046,7 +4066,20 @@
- #filter_error_trace = false
-
-[pxe]
-+pxe_append_params = systemd.journald.forward_to_console=yes ipa-debug=1 nofb nomodeset vga=normal
-+tftp_server = 10.220.36.25
-+tftp_root = /tftpboot
-+tftp_master_path = /tftpboot/master_images
-+pxe_bootfile_name = undionly.kpxe
-+pxe_config_template = $pybasedir/drivers/modules/ipxe_config.template
-+#ipxe_enabled = true
-+pxe = true
-+#ipxe_boot_script = /tftpboot/boot.ipxe
-+instance_master_path = /tftpboot/master_images
-+images_path = /tftpboot/cache
-+uefi_pxe_bootfile_name=ipxe.efi
-  
-@@ -4230,6 +4263,7 @@
- # request a particular API version, use the `version`, `min-
- # version`, and/or `max-version` options. (string value)
- #endpoint_override = <None>
-+endpoint_override = http://10.1.1.25:6385/
-  
- # Verify HTTPS connections. (boolean value)
- #insecure = false
-```
-### Создаине образа 
+## Установка узлов в режиме Legacy Boot
+### Создаине образа
 #### Добавлем катстомные хуки
 ```
 ├── elements
@@ -313,8 +292,8 @@ diskimage-builder-2.27.2-1.el7.noarch
         └── finalise.d
             └── 60-grub
 ```
-```shell 
-cat elements/ubuntu-custom/finalise.d/60-grub 
+```shell
+cat elements/ubuntu-custom/finalise.d/60-grub
 #!/bin/bash
 
 if [ ${DIB_DEBUG_TRACE:-1} -gt 0 ]; then
@@ -354,7 +333,7 @@ echo "GRUB_TIMEOUT=${DIB_GRUB_TIMEOUT:-5}" >> ${GRUB}
 
 update-grub
 ```
-#### Скрипт созадния образа
+### Скрипт созадния образа
 DIB_BLOCK_DEVICE_CONFIG с разметкой дисков
 
 uuid не обязательны
@@ -396,7 +375,6 @@ export DIB_BLOCK_DEVICE_CONFIG='''
     base: root
     type: ext4
     label: "root"
-    uuid: b733f302-0336-49c0-85f2-38ca109e8bda
     mount:
       mount_point: /
       fstab:
@@ -406,7 +384,6 @@ export DIB_BLOCK_DEVICE_CONFIG='''
     base: var_log
     type: ext4
     label: "var_log"
-    uuid: b733f302-0336-49c0-85f2-38ca109e8bdc      
     mount:
       mount_point: /var/log
       fstab:
@@ -424,7 +401,7 @@ export DIB_BLOCK_DEVICE_CONFIG='''
 '''
 ```
 ```
-cat test-test.sh 
+cat test-test.sh
 #!/bin/sh
 
 export ELEMENTS_PATH="./elements/:/usr/share/diskimage-builder/elements/"
@@ -439,16 +416,16 @@ DIB_BOOTLOADER_SERIAL_CONSOLE="" \
 disk-image-create ubuntu devuser baremetal cloud-init-nocloud ubuntu-custom bootloader  -o ubuntu.qcow2 -x
 ```
 **!!ВАЖНО!!**
-В конце вы должны получить строку 
+В конце вы должны получить строку
 ```
 Build completed successfully
 ```
 Если не так то анализируйте лог и доставляйте нужное
 Если сборщик не может отмонтировать директорию используйте
 ```
-dmsetup ls 
+dmsetup ls
 dmsetup remove ...
-losetud 
+losetud
 losetup -D
 unmount /tmp_dib*
 ```
@@ -462,9 +439,11 @@ export MD5SUM=`md5sum ubuntu.qcow2  | cut -d\  -f1| tr \\n ' '`
 ### Добавляем узел
   ```shell
   openstack baremetal node create --driver ipmi \
+      --name test-mnode \
       --driver-info ipmi_address=10.1.2.67 \
       --driver-info ipmi_username=admin \
       --driver-info ipmi_password=admin \
+      --deploy-interface direct \
       --driver-info deploy_kernel=http://10.1.1.25:8080/ipa-centos8-master.initramfs \
       --driver-info deploy_ramdisk=http://10.1.1.25:8080/ipa-centos8-master.kernel
   ```
@@ -475,14 +454,228 @@ openstack baremetal port create XX:XX:XX:XX:AE:6F --node $UUID
 ```
 ### Настариваем узел
 ```
+openstack baremetal node manage $UUID
+openstack baremetal node provide $UUID
+
 openstack baremetal node set --instance-info image_source=http://10.1.1.25:8080/ubuntu.qcow2 \
     --boot-interface ipxe \
     --instance-info image_checksum=$MD5SUM \
     --instance-info capabilities='{"boot_option": "local"}' \
-    --instance-info root_gb=70 $UUID
- ```
- ### Депоим узел
+
+```
+### Деплоим узел
  ```
  openstack baremetal node deploy $UUID --config-drive '{"meta_data": {"hostname": "server1.cluster"}}'
  ```
- 
+
+## Установка узлов в режиме UEFI
+### Создаине образа
+#### Добавлем катстомные хуки
+```
+├── elements
+    └── ubuntu-custom
+        └── finalise.d
+            └── 60-grub
+```
+**!!ВАЖНО!!**
+На текущий момент Скритп заточен под ubuntu. При создании обзара не заполнятеся /boot/efi, по этому заполняем его этим скриптом
+```shell
+cat elements/ubuntu-custom/finalise.d/60-grub
+
+#!/bin/bash
+
+if [ ${DIB_DEBUG_TRACE:-1} -gt 0 ]; then
+    set -x
+fi
+set -eu
+set -o pipefail
+
+#centos
+#yum reinstall -y grub2-efi shim 
+#grub2-mkconfig --output=/boot/efi/EFI/centos/grub.cfg
+
+#UBUNTU
+apt-get install --reinstall grub-efi-amd64
+
+GRUB="/etc/default/grub"
+GRUB_D="/etc/default/grub.d/*"
+
+#cat ${GRUB}
+perl -pi -e 's/^(GRUB_CMDLINE_LINUX.*)console=.+?\ (.*)/$1$2/g' ${GRUB}
+perl -pi -e 's/^(GRUB_CMDLINE_LINUX.*)console=.+?\ (.*)/$1$2/g' ${GRUB}
+perl -pi -e 's/^(GRUB_CMDLINE_LINUX.*)console=.+?\ (.*)/$1$2/g' ${GRUB_D}
+perl -pi -e 's/^(GRUB_CMDLINE_LINUX.*)console=.+?\ (.*)/$1$2/g' ${GRUB_D}
+
+perl -pi -e 's/^(^GRUB_TERMINAL.*)/#$1/g' ${GRUB}
+perl -pi -e 's/^(^GRUB_TERMINAL.*)/#$1/g' ${GRUB_D}
+
+perl -pi -e 's/^(^GRUB_SERIAL_COMMAND.*)/#$1/g' ${GRUB}
+perl -pi -e 's/^(^GRUB_SERIAL_COMMAND.*)/#$1/g' ${GRUB_D}
+
+perl -pi -e 's/^(^GRUB_CMDLINE_LINUX_DEFAULT.*)/#$1/g' ${GRUB}
+perl -pi -e 's/^(^GRUB_CMDLINE_LINUX_DEFAULT.*)/#$1/g' ${GRUB_D}
+
+perl -pi -e 's/^(^GRUB_DISABLE_LINUX_UUID.*)/#$1/g' ${GRUB}
+perl -pi -e 's/^(^GRUB_DISABLE_LINUX_UUID.*)/#$1/g' ${GRUB_D}
+
+perl -pi -e 's/^(^GRUB_TIMEOUT_STYLE.*)/#$1/g' ${GRUB}
+perl -pi -e 's/^(^GRUB_TIMEOUT_STYLE.*)/#$1/g' ${GRUB_D}
+
+perl -pi -e 's/^(^GRUB_TIMEOUT.*)/#$1/g' ${GRUB}
+perl -pi -e 's/^(^GRUB_TIMEOUT.*)/#$1/g' ${GRUB_D}
+
+echo "GRUB_TIMEOUT=${DIB_GRUB_TIMEOUT:-5}" >> ${GRUB}
+
+update-grub
+grub-install --efi-directory=/boot/efi
+```
+### Скрипт для создиня образа диска
+**!!ВАЖНО!!**
+
+Обрати внимаение что есть единицы измерения GB и GiB (маркетологи пишут GB на дисках)
+
+Типы разделов обязатяельны при UEFI+GPT.
+```
+export DIB_BLOCK_DEVICE_CONFIG='''
+- local_loop:
+    name: image0
+    size: 238GB
+- partitioning:
+    base: image0
+    label: gpt
+    partitions:
+      - name: ESP
+        type: 'EF00'
+        size: 512MiB
+        mkfs:
+          type: vfat
+          mount:
+            mount_point: /boot/efi
+            fstab:
+              options: "defaults"
+              fsck-passno: 1
+      - name: boot
+        size: 512MiB
+        type: 'EF02'
+        mkfs:
+          type: ext4
+          mount:
+            mount_point: /boot
+            fstab:
+              options: "defaults"
+              fsck-passno: 1
+      - name: lvm_data
+        type: '8e00'
+        size: 100%
+- lvm:
+    name: lvm
+    base: [ lvm_data ]
+    pvs:
+        - name: pv
+          base: lvm_data
+          options: [ "-ff", "-y" ]
+    vgs:
+        - name: vg
+          base: [ "pv" ]
+          options: [ "--force" ]
+    lvs:
+        - name: root
+          base: vg
+          size: 20GiB
+        - name: var_log
+          base: vg
+          size: 20GiB
+- mkfs:
+    name: fs_root
+    base: root
+    type: ext4
+    label: "root"
+    mount:
+      mount_point: /
+      fstab:
+        options: "defaults"
+- mkfs:
+    name: fs_var_log
+    base: var_log
+    type: ext4
+    label: "var_log"
+    mount:
+      mount_point: /var/log
+      fstab:
+        options: "defaults"
+'''
+```
+
+```
+cat test-efi.sh
+#!/bin/sh
+
+export ELEMENTS_PATH="./elements/:/usr/share/diskimage-builder/elements/"
+
+DIB_DEV_USER_USERNAME=test_user \
+DIB_DEV_USER_PWDLESS_SUDO=true \
+DIB_DEV_USER_PASSWORD=test12345 \
+DIB_DEV_USER_SHELL="/bin/bash" \
+DIB_BOOTLOADER_DEFAULT_CMDLINE='nomodeset vga=normal' \
+DIB_GRUB_TIMEOUT="5" \
+DIB_BLOCK_DEVICE=mbr \
+DIB_BOOTLOADER_SERIAL_CONSOLE="" \
+disk-image-create ubuntu devuser baremetal cloud-init-nocloud grub2 block-device-efi ubuntu-custom -o ubuntu.qcow2 -x --logfile dib_`date "+%Y_%m_%d-%H:%M:%S"`.log
+```
+**!!ВАЖНО!!**
+В конце вы должны получить строку
+```
+Build completed successfully
+```
+Если не так то анализируйте лог и доставляйте нужное
+Если сборщик не может отмонтировать директорию используйте
+```
+dmsetup ls
+dmsetup remove ...
+losetud
+losetup -D
+unmount /tmp_dib*
+```
+
+Считаем md5sum и копируем образ в /tftpboot
+```
+cp -af ubuntu.* /tftpboot/
+export MD5SUM=`md5sum ubuntu.qcow2  | cut -d\  -f1| tr \\n ' '`
+```
+
+### Добавляем узел
+```shell
+openstack baremetal node create --driver ipmi \
+    --name test-mnode \
+    --driver-info ipmi_address=10.1.2.67 \
+    --driver-info ipmi_username=admin \
+    --driver-info ipmi_password=admin \
+    --deploy-interface direct \
+    --driver-info deploy_kernel=http://10.1.1.25:8080/ipa-centos8-master.initramfs \
+    --driver-info deploy_ramdisk=http://10.1.1.25:8080/ipa-centos8-master.kernel
+```
+### Добавляем порт(ы) ноды. С этих маков будет разрешена загрузка по iPXE
+```shell
+openstack baremetal port create XX:XX:XX:XX:AE:6E --node $UUID
+openstack baremetal port create XX:XX:XX:XX:AE:6F --node $UUID
+```
+### Настариваем узел
+```
+openstack baremetal node manage $UUID
+openstack baremetal node provide $UUID
+
+openstack baremetal node set --instance-info image_source=http://10.1.1.25:8080/ubuntu.qcow2 \
+    --boot-interface ipxe \
+    --instance-info image_checksum=$MD5SUM \
+    --instance-info disk_format=qcow2 \
+    --deploy-interface direct \
+    --driver-info deploy_kernel=http://10.1.1.25:8080/ipa-centos8-master.kernel \
+    --driver-info deploy_ramdisk=http://10.1.1.25:8080/ipa-centos8-master.initramfs \
+    --instance-info capabilities='{"boot_option": "local", "boot_mode":"uefi", "secure_boot": "true"}' \
+    --property capabilities='boot_mode:uefi,disk_label:gpt' \
+    $UUID
+```
+### Деплоим узел
+```
+openstack baremetal node deploy $UUID --config-drive '{"meta_data": {"hostname": "server1.cluster"}}'
+```
